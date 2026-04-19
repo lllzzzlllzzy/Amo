@@ -1,0 +1,19 @@
+# 编译产物
+/target
+
+# 环境变量（含 API key、数据库密码，绝对不能提交）
+.env
+
+# 数据库文件（如果本地用 SQLite 测试过）
+*.db
+*.db-shm
+*.db-wal
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.iml
