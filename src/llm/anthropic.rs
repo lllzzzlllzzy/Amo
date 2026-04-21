@@ -54,7 +54,7 @@ impl AnthropicClient {
         body
     }
 
-    fn request(&self, stream: bool) -> reqwest::RequestBuilder {
+    fn request(&self) -> reqwest::RequestBuilder {
         self.client
             .post(format!("{}/v1/messages", self.base_url))
             // 同时发送两种认证头，兼容官方和第三方代理
@@ -71,7 +71,7 @@ impl LlmClient for AnthropicClient {
         let body = self.build_body(&req, false);
         debug!("Anthropic request: model={}", self.model_name(&req.model));
 
-        let resp = self.request(false)
+        let resp = self.request()
             .json(&body)
             .send()
             .await
@@ -100,7 +100,7 @@ impl LlmClient for AnthropicClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk, AppError>> + Send>>, AppError> {
         let body = self.build_body(&req, true);
 
-        let resp = self.request(true)
+        let resp = self.request()
             .json(&body)
             .send()
             .await

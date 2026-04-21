@@ -116,11 +116,13 @@ impl AnalysisPipeline {
         let dialog = format_messages(&req.messages);
         let context = format!("{}=== 对话记录 ===\n{}", background, dialog);
 
-        // 5步串行流水线
-        let emotion = self.step_emotion(&context).await?;
-        let patterns = self.step_patterns(&context).await?;
-        let risks = self.step_risks(&context).await?;
-        let needs = self.step_needs(&context).await?;
+        // 前 4 步互相独立，并行执行；第 5 步依赖前 4 步结果，串行
+        let (emotion, patterns, risks, needs) = tokio::try_join!(
+            self.step_emotion(&context),
+            self.step_patterns(&context),
+            self.step_risks(&context),
+            self.step_needs(&context),
+        )?;
         let suggestions = self.step_suggestions(&context, &emotion, &patterns, &risks, &needs).await?;
 
         Ok(AnalysisReport {
@@ -203,7 +205,7 @@ impl AnalysisPipeline {
         context: &str,
         emotion: &EmotionTrajectory,
         patterns: &CommunicationPatterns,
-        risks: &Vec<RiskFlag>,
+        risks: &[RiskFlag],
         needs: &CoreNeeds,
     ) -> Result<Vec<Suggestion>, AppError> {
         let summary = format!(

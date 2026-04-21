@@ -22,9 +22,6 @@ pub enum AppError {
 
     #[error("数据库错误: {0}")]
     DatabaseError(#[from] sqlx::Error),
-
-    #[error("内部错误")]
-    Internal(String),
 }
 
 impl IntoResponse for AppError {
@@ -35,7 +32,6 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::LlmError(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "数据库错误".to_string()),
-            AppError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
         };
 
         (status, Json(json!({ "error": message }))).into_response()

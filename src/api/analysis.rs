@@ -12,7 +12,7 @@ use crate::prompts::BASE_PERSONA;
 use crate::{
     analysis::{
         pipeline::AnalysisPipeline,
-        types::{AnalysisRequest, TaskStatus},
+        types::{AnalysisRequest, TaskEntry, TaskStatus},
     },
     credits::deduct::deduct_credits,
     error::AppError,
@@ -51,7 +51,7 @@ pub async fn submit(
     let task_id_clone = task_id.clone();
 
     // 插入 processing 状态
-    task_store.insert(task_id.clone(), TaskStatus::Processing);
+    task_store.insert(task_id.clone(), TaskEntry::new(TaskStatus::Processing));
 
     // 后台执行流水线
     let llm = state.llm.clone();
@@ -62,7 +62,7 @@ pub async fn submit(
             Ok(report) => TaskStatus::Done { report },
             Err(e) => TaskStatus::Failed { error: e.to_string() },
         };
-        task_store.insert(task_id_clone, status);
+        task_store.insert(task_id_clone, TaskEntry::new(status));
     });
 
     Ok(Json(json!({
@@ -78,10 +78,10 @@ pub async fn poll(
     Extension(_card): Extension<CardContext>,
     Path(task_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let status = state.task_store.get(&task_id)
+    let entry = state.task_store.get(&task_id)
         .ok_or_else(|| AppError::BadRequest("任务不存在".to_string()))?;
 
-    let resp = match status.value() {
+    let resp = match &entry.value().status {
         TaskStatus::Processing => json!({ "status": "processing" }),
         TaskStatus::Done { report } => json!({ "status": "done", "report": report }),
         TaskStatus::Failed { error } => json!({ "status": "failed", "error": error }),
@@ -120,41 +120,10 @@ pub async fn followup(
         question
     );
 
-    let llm = state.llm.clone();
-    let stream = async_stream::stream! {
-        let req = LlmRequest {
-            model: ModelTier::Smart,
-            system: Some(system),
-            messages: vec![LlmMessage::user(context)],
-            max_tokens: 1500,
-        };
-
-        match llm.stream(req).await {
-            Err(e) => {
-                yield Ok(Event::default().event("error").data(e.to_string()));
-            }
-            Ok(mut s) => {
-                use futures::StreamExt;
-                while let Some(chunk) = s.next().await {
-                    match chunk {
-                        Ok(crate::llm::types::StreamChunk::Delta(text)) => {
-                            yield Ok(Event::default().data(
-                                serde_json::to_string(&json!({"delta": text})).unwrap()
-                            ));
-                        }
-                        Ok(crate::llm::types::StreamChunk::Done) => {
-                            yield Ok(Event::default().event("done").data(""));
-                            break;
-                        }
-                        Err(e) => {
-                            yield Ok(Event::default().event("error").data(e.to_string()));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    Ok(Sse::new(stream))
+    Ok(super::llm_sse_stream(state.llm.clone(), LlmRequest {
+        model: ModelTier::Smart,
+        system: Some(system),
+        messages: vec![LlmMessage::user(context)],
+        max_tokens: 1500,
+    }))
 }

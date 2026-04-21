@@ -62,9 +62,32 @@ async fn main() -> anyhow::Result<()> {
         task_store: Arc::new(DashMap::new()),
     };
 
-    let app = api::build_router(state)
+    let app = api::build_router(state.clone())
         .layer(tower_http::cors::CorsLayer::permissive())
         .layer(tower_http::trace::TraceLayer::new_for_http());
+
+    // 后台定时清理过期任务（每 10 分钟清理超过 30 分钟的已完成/失败任务）
+    let task_store = state.task_store.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+        loop {
+            interval.tick().await;
+            let now = chrono::Utc::now().timestamp();
+            let expired: Vec<String> = task_store.iter()
+                .filter(|entry| {
+                    let val = entry.value();
+                    now - val.created_at > 1800 && !matches!(val.status, analysis::types::TaskStatus::Processing)
+                })
+                .map(|entry| entry.key().clone())
+                .collect();
+            if !expired.is_empty() {
+                tracing::info!("清理 {} 个过期任务", expired.len());
+                for key in expired {
+                    task_store.remove(&key);
+                }
+            }
+        }
+    });
 
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;

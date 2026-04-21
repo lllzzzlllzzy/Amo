@@ -5,10 +5,9 @@ use axum::{
 };
 use futures::Stream;
 use serde::Deserialize;
-use serde_json::json;
 use std::convert::Infallible;
 
-use crate::prompts::CONFLICT_ANALYSIS_SYSTEM;
+use crate::prompts::{BASE_PERSONA, CONFLICT_ANALYSIS_SYSTEM};
 use crate::{
     credits::deduct::deduct_credits,
     error::AppError,
@@ -18,12 +17,11 @@ use crate::{
 };
 
 const COST_CONFLICT: i64 = 8;
+const COST_CONFLICT_FOLLOWUP: i64 = 5;
 
 #[derive(Deserialize)]
 pub struct ConflictRequest {
-    /// 用户描述的冲突经过
     pub description: String,
-    /// 可选的背景信息
     pub background: Option<String>,
 }
 
@@ -34,51 +32,63 @@ pub async fn analyze(
     Json(req): Json<ConflictRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     if req.description.chars().count() > 2000 {
-        return Err(AppError::BadRequest("描述不能超过2000字".to_string()));
+        return Err(AppError::BadRequest("描述不能超过2000字".into()));
     }
 
     deduct_credits(&state.db, &card.code, COST_CONFLICT).await?;
 
     let content = match &req.background {
-        Some(bg) => format!("=== 背景 ===\n{}\n\n=== 冲突经过 ===\n{}", bg, req.description),
+        Some(bg) => format!("=== 背景 ===\n{bg}\n\n=== 冲突经过 ===\n{}", req.description),
         None => req.description.clone(),
     };
 
-    let llm = state.llm.clone();
-    let stream = async_stream::stream! {
-        let llm_req = LlmRequest {
-            model: ModelTier::Smart,
-            system: Some(CONFLICT_ANALYSIS_SYSTEM.to_string()),
-            messages: vec![LlmMessage::user(content)],
-            max_tokens: 2000,
-        };
+    Ok(super::llm_sse_stream(state.llm.clone(), LlmRequest {
+        model: ModelTier::Smart,
+        system: Some(CONFLICT_ANALYSIS_SYSTEM.to_string()),
+        messages: vec![LlmMessage::user(content)],
+        max_tokens: 2000,
+    }))
+}
 
-        match llm.stream(llm_req).await {
-            Err(e) => {
-                yield Ok(Event::default().event("error").data(e.to_string()));
-            }
-            Ok(mut s) => {
-                use futures::StreamExt;
-                while let Some(chunk) = s.next().await {
-                    match chunk {
-                        Ok(crate::llm::types::StreamChunk::Delta(text)) => {
-                            yield Ok(Event::default().data(
-                                serde_json::to_string(&json!({"delta": text})).unwrap()
-                            ));
-                        }
-                        Ok(crate::llm::types::StreamChunk::Done) => {
-                            yield Ok(Event::default().event("done").data(""));
-                            break;
-                        }
-                        Err(e) => {
-                            yield Ok(Event::default().event("error").data(e.to_string()));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    };
+#[derive(Deserialize)]
+pub struct ConflictFollowupRequest {
+    pub question: String,
+    pub analysis: String,
+    pub description: Option<String>,
+}
 
-    Ok(Sse::new(stream))
+/// POST /conflict/followup — 冲突分析追问（SSE）
+pub async fn followup(
+    State(state): State<AppState>,
+    Extension(card): Extension<CardContext>,
+    Json(req): Json<ConflictFollowupRequest>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    if req.question.chars().count() > 1000 {
+        return Err(AppError::BadRequest("追问内容不能超过1000字".into()));
+    }
+    if req.analysis.is_empty() {
+        return Err(AppError::BadRequest("缺少 analysis 字段".into()));
+    }
+
+    deduct_credits(&state.db, &card.code, COST_CONFLICT_FOLLOWUP).await?;
+
+    let system = format!(
+        "{BASE_PERSONA}\n\n你正在帮用户解读一份冲突分析，用户有追问。基于之前的分析内容回答，保持客观中立。"
+    );
+
+    let mut context = String::new();
+    if let Some(desc) = &req.description {
+        context.push_str(&format!("=== 原始冲突描述 ===\n{desc}\n\n"));
+    }
+    context.push_str(&format!(
+        "=== 冲突分析结果 ===\n{}\n\n=== 用户追问 ===\n{}",
+        req.analysis, req.question
+    ));
+
+    Ok(super::llm_sse_stream(state.llm.clone(), LlmRequest {
+        model: ModelTier::Smart,
+        system: Some(system),
+        messages: vec![LlmMessage::user(context)],
+        max_tokens: 1500,
+    }))
 }

@@ -108,3 +108,19 @@ pub enum TaskStatus {
     Done { report: AnalysisReport },
     Failed { error: String },
 }
+
+/// 带时间戳的任务条目，用于过期清理
+#[derive(Debug, Clone)]
+pub struct TaskEntry {
+    pub status: TaskStatus,
+    pub created_at: i64,
+}
+
+impl TaskEntry {
+    pub fn new(status: TaskStatus) -> Self {
+        Self {
+            status,
+            created_at: chrono::Utc::now().timestamp(),
+        }
+    }
+}

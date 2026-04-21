@@ -3,9 +3,9 @@ use sqlx::PgPool;
 use dashmap::DashMap;
 use crate::config::Config;
 use crate::llm::LlmClient;
-use crate::analysis::types::TaskStatus;
+use crate::analysis::types::TaskEntry;
 
-pub type TaskStore = Arc<DashMap<String, TaskStatus>>;
+pub type TaskStore = Arc<DashMap<String, TaskEntry>>;
 
 #[derive(Clone)]
 pub struct AppState {

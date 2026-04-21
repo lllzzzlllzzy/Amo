@@ -28,22 +28,22 @@ pub async fn generate_cards(
 
     let now = chrono::Utc::now().timestamp();
     let mut codes = Vec::with_capacity(req.count as usize);
-
     for _ in 0..req.count {
-        let code = generate_code();
-        sqlx::query(
-            "INSERT INTO cards (code, credits, total, created_at, expires_at) VALUES ($1, $2, $3, $4, $5)"
-        )
-        .bind(&code)
-        .bind(req.credits)
-        .bind(req.credits)
-        .bind(now)
-        .bind(req.expires_at)
-        .execute(&state.db)
-        .await?;
-
-        codes.push(code);
+        codes.push(generate_code());
     }
+
+    // 批量插入，单条 SQL
+    let mut query_builder = sqlx::QueryBuilder::new(
+        "INSERT INTO cards (code, credits, total, created_at, expires_at) "
+    );
+    query_builder.push_values(&codes, |mut b, code| {
+        b.push_bind(code)
+            .push_bind(req.credits)
+            .push_bind(req.credits)
+            .push_bind(now)
+            .push_bind(req.expires_at);
+    });
+    query_builder.build().execute(&state.db).await?;
 
     Ok(Json(json!({
         "count": codes.len(),
