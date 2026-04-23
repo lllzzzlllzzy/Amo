@@ -10,6 +10,8 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
 # cargo 使用中科大镜像源
 ENV RUSTUP_DIST_SERVER="https://rsproxy.cn"
 ENV RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
+ENV CARGO_HTTP_TIMEOUT=600
+ENV CARGO_HTTP_MULTIPLEXING=false
 RUN mkdir -p /usr/local/cargo/registry \
     && cat > /usr/local/cargo/.config.toml <<'EOF'
 [source.crates-io]
