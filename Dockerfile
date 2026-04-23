@@ -7,6 +7,16 @@ WORKDIR /app
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
+# cargo 使用中科大镜像源
+RUN mkdir -p /usr/local/cargo/registry \
+    && cat > /usr/local/cargo/.config.toml <<'EOF'
+[source.crates-io]
+replace-with = "ustc"
+
+[source.ustc]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+EOF
+
 COPY Cargo.toml Cargo.lock ./
 # 预编译依赖
 RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
