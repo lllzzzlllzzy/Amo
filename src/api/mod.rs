@@ -9,6 +9,7 @@ use futures::Stream;
 use std::convert::Infallible;
 
 use crate::{
+    credits::deduct::deduct_credits,
     llm::{LlmClient, types::{LlmRequest, StreamChunk}},
     middleware::{admin_auth::admin_auth_middleware, card_auth::card_auth_middleware},
     state::AppState,
@@ -20,10 +21,13 @@ pub mod cards;
 pub mod conflict;
 pub mod emotional;
 
-/// 公共 SSE 流式辅助：将 LlmRequest 转为标准 SSE 事件流
+/// 公共 SSE 流式辅助：LLM 成功响应后才扣除 credits
 pub fn llm_sse_stream(
     llm: Arc<dyn LlmClient>,
     req: LlmRequest,
+    db: sqlx::PgPool,
+    card_code: String,
+    amount: i64,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = async_stream::stream! {
         match llm.stream(req).await {
@@ -31,6 +35,11 @@ pub fn llm_sse_stream(
                 yield Ok(Event::default().event("error").data(e.to_string()));
             }
             Ok(mut s) => {
+                // LLM 请求成功，此时才扣除 credits
+                if let Err(e) = deduct_credits(&db, &card_code, amount).await {
+                    yield Ok(Event::default().event("error").data(e.to_string()));
+                    return;
+                }
                 use futures::StreamExt;
                 while let Some(chunk) = s.next().await {
                     match chunk {

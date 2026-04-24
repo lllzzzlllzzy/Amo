@@ -43,9 +43,6 @@ pub async fn submit(
         }
     }
 
-    // 先扣额度
-    deduct_credits(&state.db, &card.code, COST_ANALYSIS).await?;
-
     let task_id = Uuid::new_v4().to_string();
     let task_store = state.task_store.clone();
     let task_id_clone = task_id.clone();
@@ -53,13 +50,19 @@ pub async fn submit(
     // 插入 processing 状态
     task_store.insert(task_id.clone(), TaskEntry::new(TaskStatus::Processing));
 
-    // 后台执行流水线
+    // 后台执行流水线，成功后才扣除 credits
     let llm = state.llm.clone();
+    let db = state.db.clone();
+    let card_code = card.code.clone();
     tokio::spawn(async move {
         let pipeline = AnalysisPipeline::new(llm);
-        let result = pipeline.run(&req).await;
-        let status = match result {
-            Ok(report) => TaskStatus::Done { report },
+        let status = match pipeline.run(&req).await {
+            Ok(report) => {
+                match deduct_credits(&db, &card_code, COST_ANALYSIS).await {
+                    Ok(_) => TaskStatus::Done { report },
+                    Err(e) => TaskStatus::Failed { error: format!("扣除额度失败: {e}") },
+                }
+            }
             Err(e) => TaskStatus::Failed { error: e.to_string() },
         };
         task_store.insert(task_id_clone, TaskEntry::new(status));
@@ -68,7 +71,6 @@ pub async fn submit(
     Ok(Json(json!({
         "task_id": task_id,
         "status": "processing",
-        "credits_used": COST_ANALYSIS,
     })))
 }
 
@@ -106,13 +108,7 @@ pub async fn followup(
         return Err(AppError::BadRequest("缺少 report 字段".to_string()));
     }
 
-    // 先扣额度
-    deduct_credits(&state.db, &card.code, COST_FOLLOWUP).await?;
-
-    let system = format!(
-        "{}\n\n你正在帮用户解读一份关系分析报告，用户有追问。",
-        BASE_PERSONA
-    );
+    let system = format!("{BASE_PERSONA}\n\n你正在帮用户解读一份关系分析报告，用户有追问。");
 
     let context = format!(
         "=== 分析报告 ===\n{}\n\n=== 用户追问 ===\n{}",
@@ -125,5 +121,5 @@ pub async fn followup(
         system: Some(system),
         messages: vec![LlmMessage::user(context)],
         max_tokens: 1500,
-    }))
+    }, state.db.clone(), card.code.clone(), COST_FOLLOWUP))
 }

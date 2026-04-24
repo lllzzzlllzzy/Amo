@@ -9,7 +9,6 @@ use std::convert::Infallible;
 
 use crate::prompts::{BASE_PERSONA, CONFLICT_ANALYSIS_SYSTEM};
 use crate::{
-    credits::deduct::deduct_credits,
     error::AppError,
     llm::types::{LlmMessage, LlmRequest, ModelTier},
     middleware::card_auth::CardContext,
@@ -35,8 +34,6 @@ pub async fn analyze(
         return Err(AppError::BadRequest("描述不能超过2000字".into()));
     }
 
-    deduct_credits(&state.db, &card.code, COST_CONFLICT).await?;
-
     let content = match &req.background {
         Some(bg) => format!("=== 背景 ===\n{bg}\n\n=== 冲突经过 ===\n{}", req.description),
         None => req.description.clone(),
@@ -47,7 +44,7 @@ pub async fn analyze(
         system: Some(CONFLICT_ANALYSIS_SYSTEM.to_string()),
         messages: vec![LlmMessage::user(content)],
         max_tokens: 2000,
-    }))
+    }, state.db.clone(), card.code.clone(), COST_CONFLICT))
 }
 
 #[derive(Deserialize)]
@@ -70,8 +67,6 @@ pub async fn followup(
         return Err(AppError::BadRequest("缺少 analysis 字段".into()));
     }
 
-    deduct_credits(&state.db, &card.code, COST_CONFLICT_FOLLOWUP).await?;
-
     let system = format!(
         "{BASE_PERSONA}\n\n你正在帮用户解读一份冲突分析，用户有追问。基于之前的分析内容回答，保持客观中立。"
     );
@@ -90,5 +85,5 @@ pub async fn followup(
         system: Some(system),
         messages: vec![LlmMessage::user(context)],
         max_tokens: 1500,
-    }))
+    }, state.db.clone(), card.code.clone(), COST_CONFLICT_FOLLOWUP))
 }

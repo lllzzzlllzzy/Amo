@@ -9,7 +9,6 @@ use std::convert::Infallible;
 
 use crate::prompts::EMOTIONAL_SUPPORT_SYSTEM;
 use crate::{
-    credits::deduct::deduct_credits,
     error::AppError,
     llm::types::{LlmMessage, LlmRequest, ModelTier},
     middleware::card_auth::CardContext,
@@ -34,8 +33,6 @@ pub async fn chat(
         return Err(AppError::BadRequest("消息不能超过1000字".into()));
     }
 
-    deduct_credits(&state.db, &card.code, COST_PER_TURN).await?;
-
     let mut messages = req.history.unwrap_or_default();
     messages.push(LlmMessage::user(&req.message));
 
@@ -44,5 +41,5 @@ pub async fn chat(
         system: Some(EMOTIONAL_SUPPORT_SYSTEM.to_string()),
         messages,
         max_tokens: 1000,
-    }))
+    }, state.db.clone(), card.code.clone(), COST_PER_TURN))
 }
