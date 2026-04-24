@@ -51,26 +51,52 @@ fn format_background(bg: &Option<Background>) -> String {
     }
 }
 
-/// 修复 JSON 字符串值内的裸换行符
-/// 遍历字符，在字符串内部遇到裸换行时替换为 \n
-fn fix_unescaped_newlines(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+/// 修复 JSON 字符串值内的裸换行符、控制字符及未转义引号
+fn fix_json_strings(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut result = String::with_capacity(s.len() + 32);
+    let mut i = 0;
     let mut in_string = false;
     let mut escaped = false;
-    for ch in s.chars() {
+
+    while i < chars.len() {
+        let ch = chars[i];
+
         if escaped {
             result.push(ch);
             escaped = false;
+            i += 1;
             continue;
         }
+
         match ch {
             '\\' if in_string => { result.push(ch); escaped = true; }
-            '"' => { result.push(ch); in_string = !in_string; }
+            '"' if in_string => {
+                // 前瞻：跳过空白，看下一个有效字符
+                let mut j = i + 1;
+                while j < chars.len() && matches!(chars[j], ' ' | '\t' | '\n' | '\r') {
+                    j += 1;
+                }
+                let next = chars.get(j).copied();
+                if matches!(next, Some(',') | Some('}') | Some(']') | Some(':') | None) {
+                    // 是字符串的结束引号
+                    result.push('"');
+                    in_string = false;
+                } else {
+                    // 字符串内容里的裸引号，转义
+                    result.push_str("\\\"");
+                }
+            }
+            '"' => { result.push('"'); in_string = true; }
             '\n' if in_string => result.push_str("\\n"),
             '\r' if in_string => result.push_str("\\r"),
             '\t' if in_string => result.push_str("\\t"),
+            c if in_string && (c as u32) < 0x20 => {
+                result.push_str(&format!("\\u{:04x}", c as u32));
+            }
             _ => result.push(ch),
         }
+        i += 1;
     }
     result
 }
@@ -82,22 +108,22 @@ fn parse_json_response<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, 
     let end = text.rfind('}').map(|i| i + 1).unwrap_or(text.len());
     let json_str = &text[start..end];
 
-    // 替换中文引号
+    // 替换中文引号为转义引号（避免破坏 JSON 字符串结构）
     let json_str = json_str
-        .replace('\u{201c}', "\"")
-        .replace('\u{201d}', "\"")
+        .replace('\u{201c}', "\\\"")
+        .replace('\u{201d}', "\\\"")
         .replace('\u{2018}', "'")
         .replace('\u{2019}', "'");
 
-    // 修复裸换行
-    let json_str = fix_unescaped_newlines(&json_str);
+    // 修复裸换行及字符串内未转义引号
+    let json_str = fix_json_strings(&json_str);
 
     // 临时：打印原始响应便于调试
     tracing::debug!("LLM raw response length: {}", json_str.len());
 
     serde_json::from_str(&json_str)
         .map_err(|e| {
-            tracing::error!("JSON parse error: {}", e);
+            tracing::error!("JSON parse error: {}\nRaw JSON:\n{}", e, &json_str);
             AppError::LlmError(format!("解析响应失败: {}", e))
         })
 }
