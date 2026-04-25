@@ -15,7 +15,8 @@ use crate::{
     state::AppState,
 };
 
-const COST_PER_TURN: i64 = 2;
+const COST_FIRST_TURN: i64 = 10;
+const COST_FOLLOW_UP: i64 = 5;
 
 #[derive(Deserialize)]
 pub struct ChatRequest {
@@ -33,13 +34,15 @@ pub async fn chat(
         return Err(AppError::BadRequest("消息不能超过1000字".into()));
     }
 
-    let mut messages = req.history.unwrap_or_default();
+    let history = req.history.unwrap_or_default();
+    let cost = if history.is_empty() { COST_FIRST_TURN } else { COST_FOLLOW_UP };
+    let mut messages = history;
     messages.push(LlmMessage::user(&req.message));
 
     Ok(super::llm_sse_stream(state.llm.clone(), LlmRequest {
         model: ModelTier::Fast,
         system: Some(EMOTIONAL_SUPPORT_SYSTEM.to_string()),
         messages,
-        max_tokens: 1000,
-    }, state.db.clone(), card.code.clone(), COST_PER_TURN))
+        max_tokens: 2000,
+    }, state.db.clone(), card.code.clone(), cost))
 }

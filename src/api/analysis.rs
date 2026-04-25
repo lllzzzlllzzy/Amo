@@ -1,18 +1,17 @@
+use std::sync::Arc;
 use axum::{
-    extract::{Path, State},
+    extract::State,
     response::sse::{Event, Sse},
     Extension, Json,
 };
-use futures::Stream;
-use serde_json::json;
+use futures::{Stream, StreamExt};
 use std::convert::Infallible;
-use uuid::Uuid;
 
 use crate::prompts::BASE_PERSONA;
 use crate::{
     analysis::{
-        pipeline::AnalysisPipeline,
-        types::{AnalysisRequest, TaskEntry, TaskStatus},
+        pipeline::{AnalysisPipeline, SectionEvent},
+        types::AnalysisRequest,
     },
     credits::deduct::deduct_credits,
     error::AppError,
@@ -22,15 +21,14 @@ use crate::{
 };
 
 const COST_ANALYSIS: i64 = 20;
-const COST_FOLLOWUP: i64 = 3;
+const COST_FOLLOWUP: i64 = 5;
 
-/// POST /analysis — 提交分析请求，立即返回 task_id
+/// POST /analysis — 提交分析请求，SSE 流式逐步返回各 section
 pub async fn submit(
     State(state): State<AppState>,
     Extension(card): Extension<CardContext>,
     Json(req): Json<AnalysisRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    // 校验输入
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     if req.messages.is_empty() {
         return Err(AppError::BadRequest("消息列表不能为空".to_string()));
     }
@@ -43,53 +41,38 @@ pub async fn submit(
         }
     }
 
-    let task_id = Uuid::new_v4().to_string();
-    let task_store = state.task_store.clone();
-    let task_id_clone = task_id.clone();
-
-    // 插入 processing 状态
-    task_store.insert(task_id.clone(), TaskEntry::new(TaskStatus::Processing));
-
-    // 后台执行流水线，成功后才扣除 credits
-    let llm = state.llm.clone();
     let db = state.db.clone();
     let card_code = card.code.clone();
-    tokio::spawn(async move {
-        let pipeline = AnalysisPipeline::new(llm);
-        let status = match pipeline.run(&req).await {
-            Ok(report) => {
-                match deduct_credits(&db, &card_code, COST_ANALYSIS).await {
-                    Ok(_) => TaskStatus::Done { report },
-                    Err(e) => TaskStatus::Failed { error: format!("扣除额度失败: {e}") },
+    let pipeline = Arc::new(AnalysisPipeline::new(state.llm.clone()));
+
+    let stream = async_stream::stream! {
+        let mut section_stream = std::pin::pin!(pipeline.run_streaming(req));
+        let mut credited = false;
+
+        while let Some(event) = section_stream.next().await {
+            match &event {
+                SectionEvent::Section { .. } => {
+                    if !credited {
+                        if let Err(e) = deduct_credits(&db, &card_code, COST_ANALYSIS).await {
+                            yield Ok(Event::default().event("error").data(e.to_string()));
+                            return;
+                        }
+                        credited = true;
+                    }
+                    let data = serde_json::to_string(&event).unwrap_or_default();
+                    yield Ok(Event::default().data(data));
+                }
+                SectionEvent::Error { message } => {
+                    yield Ok(Event::default().event("error").data(message.clone()));
+                    return;
                 }
             }
-            Err(e) => TaskStatus::Failed { error: e.to_string() },
-        };
-        task_store.insert(task_id_clone, TaskEntry::new(status));
-    });
+        }
 
-    Ok(Json(json!({
-        "task_id": task_id,
-        "status": "processing",
-    })))
-}
-
-/// GET /analysis/:task_id — 轮询分析状态
-pub async fn poll(
-    State(state): State<AppState>,
-    Extension(_card): Extension<CardContext>,
-    Path(task_id): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let entry = state.task_store.get(&task_id)
-        .ok_or_else(|| AppError::BadRequest("任务不存在".to_string()))?;
-
-    let resp = match &entry.value().status {
-        TaskStatus::Processing => json!({ "status": "processing" }),
-        TaskStatus::Done { report } => json!({ "status": "done", "report": report }),
-        TaskStatus::Failed { error } => json!({ "status": "failed", "error": error }),
+        yield Ok(Event::default().event("done").data(""));
     };
 
-    Ok(Json(resp))
+    Ok(Sse::new(stream))
 }
 
 /// POST /analysis/followup — 针对报告追问（SSE 流式）
@@ -108,18 +91,27 @@ pub async fn followup(
         return Err(AppError::BadRequest("缺少 report 字段".to_string()));
     }
 
-    let system = format!("{BASE_PERSONA}\n\n你正在帮用户解读一份关系分析报告，用户有追问。");
-
-    let context = format!(
-        "=== 分析报告 ===\n{}\n\n=== 用户追问 ===\n{}",
-        serde_json::to_string_pretty(&report_json).unwrap_or_default(),
-        question
+    let system = format!(
+        "{BASE_PERSONA}\n\n你正在帮用户解读一份关系分析报告，用户有追问。\n\n报告已包含完整分析，你有足够的信息直接回答。不要再追问用户，直接给出具体的解读或建议。\n\n=== 分析报告 ===\n{}",
+        serde_json::to_string_pretty(&report_json).unwrap_or_default()
     );
+
+    let history: Vec<LlmMessage> = body["history"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| serde_json::from_value(m.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut messages = history;
+    messages.push(LlmMessage::user(question));
 
     Ok(super::llm_sse_stream(state.llm.clone(), LlmRequest {
         model: ModelTier::Smart,
         system: Some(system),
-        messages: vec![LlmMessage::user(context)],
+        messages,
         max_tokens: 1500,
     }, state.db.clone(), card.code.clone(), COST_FOLLOWUP))
 }

@@ -15,7 +15,7 @@ use crate::{
     state::AppState,
 };
 
-const COST_CONFLICT: i64 = 8;
+const COST_CONFLICT: i64 = 10;
 const COST_CONFLICT_FOLLOWUP: i64 = 5;
 
 #[derive(Deserialize)]
@@ -52,6 +52,7 @@ pub struct ConflictFollowupRequest {
     pub question: String,
     pub analysis: String,
     pub description: Option<String>,
+    pub history: Option<Vec<LlmMessage>>,
 }
 
 /// POST /conflict/followup — 冲突分析追问（SSE）
@@ -67,23 +68,22 @@ pub async fn followup(
         return Err(AppError::BadRequest("缺少 analysis 字段".into()));
     }
 
-    let system = format!(
-        "{BASE_PERSONA}\n\n你正在帮用户解读一份冲突分析，用户有追问。基于之前的分析内容回答，保持客观中立。"
+    let mut system = format!(
+        "{BASE_PERSONA}\n\n你正在帮用户解读一份冲突分析，用户有追问。分析已包含完整信息，你有足够的信息直接回答。不要再追问用户，直接给出具体的解读或建议，保持客观中立。\n\n"
     );
-
-    let mut context = String::new();
     if let Some(desc) = &req.description {
-        context.push_str(&format!("=== 原始冲突描述 ===\n{desc}\n\n"));
+        system.push_str(&format!("=== 原始冲突描述 ===\n{desc}\n\n"));
     }
-    context.push_str(&format!(
-        "=== 冲突分析结果 ===\n{}\n\n=== 用户追问 ===\n{}",
-        req.analysis, req.question
-    ));
+    system.push_str(&format!("=== 冲突分析结果 ===\n{}", req.analysis));
+
+    // 支持多轮追问：前端传入历史对话，追加当前问题
+    let mut messages = req.history.unwrap_or_default();
+    messages.push(LlmMessage::user(req.question));
 
     Ok(super::llm_sse_stream(state.llm.clone(), LlmRequest {
         model: ModelTier::Smart,
         system: Some(system),
-        messages: vec![LlmMessage::user(context)],
+        messages,
         max_tokens: 1500,
     }, state.db.clone(), card.code.clone(), COST_CONFLICT_FOLLOWUP))
 }

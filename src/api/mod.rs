@@ -68,7 +68,6 @@ pub fn build_router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/cards/balance", get(cards::balance))
         .route("/analysis", post(analysis::submit))
-        .route("/analysis/:task_id", get(analysis::poll))
         .route("/analysis/followup", post(analysis::followup))
         .route("/emotional/chat", post(emotional::chat))
         .route("/conflict/analyze", post(conflict::analyze))

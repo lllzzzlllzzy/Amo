@@ -13,7 +13,6 @@ Base URL: `http://your-server:3000`
   - [验证卡密](#1-验证卡密)
   - [查询余额](#2-查询剩余额度)
   - [提交聊天记录分析](#3-提交聊天记录分析)
-  - [轮询分析状态](#4-轮询分析状态)
   - [分析报告追问](#5-针对分析报告追问)
   - [情绪疏导对话](#6-情绪疏导对话)
   - [冲突分析](#7-冲突分析)
@@ -198,7 +197,7 @@ Authorization: Bearer AMO-XXXX-XXXX-XXXX
 
 ### 3. 提交聊天记录分析
 
-提交后立即返回 `task_id`，分析在后台异步执行（约 1-2 分钟），需轮询状态。消耗 **20 credits**。
+提交后立即以 SSE 流式逐步返回各分析模块，前 4 个模块串行生成（按顺序依次返回），最后推送建议模块。消耗 **20 credits**（首个模块成功后扣除）。
 
 ```
 POST /analysis
@@ -244,158 +243,108 @@ Content-Type: application/json
 | `messages[].speaker` | string | 是 | 只能是 `"self"` 或 `"partner"` |
 | `messages[].text` | string | 是 | 最多 500 字 |
 
-**响应**
+**响应** — SSE 流式
 
-```json
-{
-  "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "processing",
-  "credits_used": 20
-}
-```
-
-**前端逻辑：**
-1. 提交后将 `task_id` 存入组件状态
-2. 立即开始轮询（见接口 4）
-3. 展示"分析中"加载状态
-
----
-
-### 4. 轮询分析状态
+每个分析模块完成后推送一条 `data` 事件，格式：
 
 ```
-GET /analysis/:task_id
-Authorization: Bearer AMO-XXXX-XXXX-XXXX
+data: {"type":"section","name":"emotion_trajectory","data":{...}}
+
+data: {"type":"section","name":"communication_patterns","data":{...}}
+
+data: {"type":"section","name":"risk_flags","data":[...]}
+
+data: {"type":"section","name":"core_needs","data":{...}}
+
+data: {"type":"section","name":"suggestions","data":[...]}
+
+event: done
+data:
 ```
 
-**响应 — 处理中**
+前 4 个 section（`emotion_trajectory` / `communication_patterns` / `risk_flags` / `core_needs`）串行生成，按此顺序依次到达。`suggestions` 最后到达。
 
-```json
-{ "status": "processing" }
-```
+**section name 与数据结构对应关系：**
 
-**响应 — 完成**
+| name | data 类型 | 说明 |
+|------|-----------|------|
+| `emotion_trajectory` | object | 情绪轨迹，含 segments / turning_points / summary |
+| `communication_patterns` | object | 沟通模式，含依恋风格、权力动态等 |
+| `risk_flags` | array | 风险标注列表 |
+| `core_needs` | object | 核心诉求，含 self/partner 的表层/深层需求 |
+| `suggestions` | array | 话术建议列表 |
 
-```json
-{
-  "status": "done",
-  "report": {
-    "emotion_trajectory": {
-      "segments": [
-        { "index": 0, "speaker": "self",    "emotion": "焦虑",  "intensity": 0.6 },
-        { "index": 1, "speaker": "partner", "emotion": "冷漠",  "intensity": 0.7 },
-        { "index": 2, "speaker": "self",    "emotion": "委屈",  "intensity": 0.7 },
-        { "index": 3, "speaker": "partner", "emotion": "愤怒",  "intensity": 0.85 }
-      ],
-      "turning_points": [
-        { "index": 3, "description": "对方语气变得强硬，情绪从冷漠升级为愤怒" }
-      ],
-      "summary": "一方试图关心但遭遇冷漠，持续追问后对方情绪骤然激化"
-    },
-    "communication_patterns": {
-      "self_attachment_style": "焦虑型",
-      "partner_attachment_style": "回避型",
-      "power_dynamic": "对方通过情感撤退控制互动节奏，你处于追逐和试探的位置",
-      "failure_modes": ["追逃模式", "情感隔离"],
-      "summary": "典型的焦虑-回避组合，你越靠近对方越往后退"
-    },
-    "risk_flags": [
-      {
-        "flag_type": "cold_violence",
-        "severity": "medium",
-        "evidence_indices": [1, 3, 5],
-        "evidence_text": "没事 / 说没事就没事 / 不需要你关心，烦死了",
-        "explanation": "对方用简短冷淡的回应持续拒绝沟通，最终表达厌烦，这种情感撤回会让关心的一方觉得表达爱是一种错"
-      },
-      {
-        "flag_type": "gaslighting",
-        "severity": "low",
-        "evidence_indices": [3],
-        "evidence_text": "说没事就没事，你想太多了",
-        "explanation": "否定对方的感知，让其怀疑自己的判断力"
-      }
-    ],
-    "core_needs": {
-      "self_surface": "想确认对方是否有情绪",
-      "self_deep": "需要连接和确定性，渴望被信任、被允许进入对方的情绪世界",
-      "partner_surface": "拒绝关心，说没事",
-      "partner_deep": "需要自主和安全感，可能不想被追问，需要空间处理情绪"
-    },
-    "suggestions": [
-      {
-        "context": "刚被推开之后，不知道该怎么接",
-        "original": "我只是关心你",
-        "rewrite": "好，我不问了。你想说的时候我在。",
-        "rationale": "停止追问给空间，同时留门没关死，对方反而更可能主动开口"
-      },
-      {
-        "context": "冷静后想重新开启对话",
-        "original": "你今天怎么了",
-        "rewrite": "最近感觉我们有点远，不知道是不是我的错觉。你有空的时候聊聊？",
-        "rationale": "把焦点从'你怎么了'转移到'我们之间'，不会让对方感到被审问"
-      }
-    ]
-  }
-}
-```
-
-**响应 — 失败**
-
-```json
-{
-  "status": "failed",
-  "error": "LLM 调用失败: ..."
-}
-```
-
-**report 字段说明：**
-
-| 字段 | 说明 |
-|------|------|
-| `emotion_trajectory.segments[].speaker` | `"self"` 或 `"partner"` |
-| `emotion_trajectory.segments[].intensity` | 0.0-1.0，越高情绪越强烈 |
-| `risk_flags[].flag_type` | `cold_violence` / `pua` / `gaslighting` / `manipulation` |
-| `risk_flags[].severity` | `low` / `medium` / `high` |
-| `risk_flags[].evidence_indices` | 对应 messages 数组的下标 |
-| `suggestions[].original` | 原始话术，可能为 `null` |
-
-**前端轮询逻辑：**
+**前端实现逻辑：**
 
 ```javascript
-async function pollAnalysis(taskId, cardCode, onDone, onError) {
-  const maxAttempts = 40  // 最多等 2 分钟
-  let attempts = 0
+async function submitAnalysis(body, cardCode, onSection, onDone, onError) {
+  const response = await fetch('/analysis', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${cardCode}`,
+    },
+    body: JSON.stringify(body),
+  })
 
-  const poll = async () => {
-    attempts++
-    if (attempts > maxAttempts) {
-      onError('分析超时，请重试')
-      return
-    }
-
-    const res = await fetch(`/analysis/${taskId}`, {
-      headers: { 'Authorization': `Bearer ${cardCode}` }
-    })
-    const data = await res.json()
-
-    if (data.status === 'done') {
-      onDone(data.report)
-    } else if (data.status === 'failed') {
-      onError(data.error)
-    } else {
-      setTimeout(poll, 3000)  // 3 秒后再试
-    }
+  if (!response.ok) {
+    const err = await response.json()
+    onError(err.error)
+    return
   }
 
-  poll()
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop()
+
+    for (const line of lines) {
+      if (line.startsWith('data: ') && line.length > 6) {
+        try {
+          const event = JSON.parse(line.slice(6))
+          if (event.type === 'section') {
+            onSection(event.name, event.data)  // 立即渲染该模块
+          }
+        } catch {}
+      }
+      if (line === 'event: done') {
+        onDone()
+        return
+      }
+      if (line === 'event: error') {
+        // 下一行 data 是错误信息
+      }
+    }
+  }
 }
+```
+
+**前端交互流程：**
+
+```
+用户填写背景信息 + 对话记录
+    ↓
+点击"开始分析" → POST /analysis（SSE）
+    ↓
+按顺序收到 section event（emotion_trajectory → communication_patterns → risk_flags → core_needs → suggestions）
+    ↓
+每收到一个 section → 立即渲染对应模块（可用骨架屏占位，数据到了替换）
+    ↓
+event: done → 分析完成
 ```
 
 ---
 
 ### 5. 针对分析报告追问
 
-对已完成的分析报告进行追问，流式返回。消耗 **3 credits / 次**。
+对已完成的分析报告进行追问，支持多轮对话，流式返回。消耗 **3 credits / 次**。
 
 ```
 POST /analysis/followup
@@ -407,25 +356,54 @@ Content-Type: application/json
 
 ```json
 {
-  "question": "为什么说对方是回避型依恋？有什么具体表现？",
-  "report": { "...上一步返回的完整 report 对象..." }
+  "question": "那我该怎么回应他？",
+  "report": { "...上一步返回的完整 report 对象..." },
+  "history": [
+    { "role": "user",      "content": "为什么说对方是回避型依恋？有什么具体表现？" },
+    { "role": "assistant", "content": "回避型依恋的核心特征是..." }
+  ]
 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `question` | string | 是 | 追问内容 |
+| `question` | string | 是 | 当前追问内容 |
 | `report` | object | 是 | 完整的 report 对象，直接传 `/analysis/:id` 返回的 report 字段 |
+| `history` | array | 否 | 本次追问之前的对话历史，首次追问不传或传 `[]` |
+| `history[].role` | string | 是 | `"user"` 或 `"assistant"` |
+| `history[].content` | string | 是 | 消息内容 |
 
 **响应** — SSE 流式，见通用说明
 
-**前端逻辑：** 报告展示页底部提供输入框，用户输入问题后调用此接口，将流式回复展示在报告下方。
+**前端多轮追问维护逻辑：**
+
+```javascript
+// 组件状态
+const followupHistory = []
+
+async function sendFollowup(question, report, cardCode) {
+  let assistantReply = ''
+
+  await streamRequest(
+    '/analysis/followup',
+    { question, report, history: followupHistory },
+    cardCode,
+    (delta) => { assistantReply += delta; appendToLastMessage(delta) },
+    () => {
+      // 流结束后将本轮追加到 history
+      followupHistory.push({ role: 'user', content: question })
+      followupHistory.push({ role: 'assistant', content: assistantReply })
+    },
+    (err) => showError(err)
+  )
+}
+```
 
 ---
 
 ### 6. 情绪疏导对话
 
-多轮对话，AI 扮演知心朋友进行情绪疏导。消耗 **2 credits / 轮**。
+多轮对话，AI 扮演知心朋友进行情绪疏导。首轮消耗 **10 credits**，后续追问每轮消耗 **5 credits**。
 
 ```
 POST /emotional/chat
@@ -453,6 +431,13 @@ Content-Type: application/json
 | `history[].content` | string | 是 | 消息内容 |
 
 **响应** — SSE 流式，见通用说明
+
+**额度判断：** 后端以请求中 `history` 是否为空来区分首轮和追问。前端可用同样逻辑在发送前展示提示：
+
+```javascript
+const cost = history.length === 0 ? 10 : 5
+showCostHint(`本次消耗 ${cost} credits`)
+```
 
 **前端多轮对话维护逻辑：**
 
@@ -509,7 +494,7 @@ Content-Type: application/json
 
 ### 8. 冲突分析追问
 
-对冲突分析结果进行追问，流式返回。消耗 **5 credits / 次**。
+对冲突分析结果进行追问，支持多轮对话，流式返回。消耗 **5 credits / 次**。
 
 ```
 POST /conflict/followup
@@ -521,9 +506,13 @@ Content-Type: application/json
 
 ```json
 {
-  "question": "你说的冷暴力具体指哪些表现？我该怎么应对？",
+  "question": "那我现在应该主动道歉吗？",
   "analysis": "上一次 /conflict/analyze 返回的完整文本（前端拼接 SSE delta 后的完整字符串）",
-  "description": "（可选）原始冲突描述，提供后上下文更完整"
+  "description": "（可选）原始冲突描述，提供后上下文更完整",
+  "history": [
+    { "role": "user",      "content": "你说的冷暴力具体指哪些表现？" },
+    { "role": "assistant", "content": "冷暴力主要体现在..." }
+  ]
 }
 ```
 
@@ -532,10 +521,13 @@ Content-Type: application/json
 | `question` | string | 是 | 最多 1000 字 |
 | `analysis` | string | 是 | 上次冲突分析的完整回复文本 |
 | `description` | string | 否 | 原始冲突描述 |
+| `history` | array | 否 | 本次追问之前的对话历史，首次追问不传或传 `[]` |
+| `history[].role` | string | 是 | `"user"` 或 `"assistant"` |
+| `history[].content` | string | 是 | 消息内容 |
 
 **响应** — SSE 流式，见通用说明
 
-**前端逻辑：** 冲突分析结果展示页底部提供输入框，用户输入追问后调用此接口。前端需在冲突分析 SSE 流结束后，将所有 delta 拼接保存为完整文本，作为 `analysis` 字段传入。
+**前端多轮追问维护逻辑：** 与分析报告追问相同，维护一个 `followupHistory` 数组，每轮 SSE 结束后将本轮问答追加进去，下次请求时带上。
 
 ---
 
@@ -631,9 +623,10 @@ X-Admin-Token: your_admin_token
 | 功能 | 消耗 credits |
 |------|-------------|
 | 聊天记录分析（完整） | 20 |
-| 分析报告追问（每次） | 3 |
-| 情绪疏导对话（每轮） | 2 |
-| 冲突分析 | 8 |
+| 分析报告追问（每次） | 5 |
+| 情绪疏导对话（首轮） | 10 |
+| 情绪疏导对话（追问每轮） | 5 |
+| 冲突分析 | 10 |
 | 冲突分析追问（每次） | 5 |
 | 验证卡密 / 查询余额 | 0 |
 
@@ -689,11 +682,13 @@ async function request(url, options = {}) {
     ↓
 用户逐条输入对话（self/partner 切换）
     ↓
-点击"开始分析"→ POST /analysis → 获得 task_id
+点击"开始分析" → POST /analysis（SSE）
     ↓
-展示加载动画，每 3 秒轮询 GET /analysis/:task_id
+按顺序收到 section（emotion_trajectory → communication_patterns → risk_flags → core_needs → suggestions）
     ↓
-status = done → 渲染报告（5个模块）
+每收到一个 section → 立即渲染对应模块（建议用骨架屏占位，数据到了替换）
+    ↓
+event: done → 全部完成，展示追问输入框
     ↓
 用户可在报告下方输入追问 → POST /analysis/followup（SSE）
 ```
@@ -730,7 +725,7 @@ const flagTypeLabel = {
 ### 注意事项
 
 1. **SSE 必须用 fetch**，不能用 `EventSource`（不支持自定义请求头）
-2. **情绪疏导的 history 由前端维护**，每轮请求后手动追加
-3. **分析任务存内存**，服务重启后 task_id 失效，需重新提交
+2. **情绪疏导和追问的 history 均由前端维护**，每轮请求后手动追加
+3. **分析结果按顺序渲染**，5 个模块按固定顺序依次到达（emotion_trajectory → communication_patterns → risk_flags → core_needs → suggestions），前端按顺序渲染即可
 4. **额度不足（402）** 时提示用户购买新卡密，不要自动跳转
 5. **intensity 字段**是 float，展示时建议乘以 100 转为百分比或用进度条

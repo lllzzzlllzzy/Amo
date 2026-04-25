@@ -35,16 +35,6 @@ pub enum Speaker {
     Partner,
 }
 
-/// 完整分析报告
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AnalysisReport {
-    pub emotion_trajectory: EmotionTrajectory,
-    pub communication_patterns: CommunicationPatterns,
-    pub risk_flags: Vec<RiskFlag>,
-    pub core_needs: CoreNeeds,
-    pub suggestions: Vec<Suggestion>,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EmotionTrajectory {
     pub segments: Vec<EmotionSegment>,
@@ -100,27 +90,3 @@ pub struct Suggestion {
     pub rationale: String,
 }
 
-/// 任务状态（内存中维护，不持久化）
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "status", rename_all = "lowercase")]
-pub enum TaskStatus {
-    Processing,
-    Done { report: AnalysisReport },
-    Failed { error: String },
-}
-
-/// 带时间戳的任务条目，用于过期清理
-#[derive(Debug, Clone)]
-pub struct TaskEntry {
-    pub status: TaskStatus,
-    pub created_at: i64,
-}
-
-impl TaskEntry {
-    pub fn new(status: TaskStatus) -> Self {
-        Self {
-            status,
-            created_at: chrono::Utc::now().timestamp(),
-        }
-    }
-}

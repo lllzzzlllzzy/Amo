@@ -1,11 +1,20 @@
 use std::sync::Arc;
 use serde_json::Value;
+use futures::Stream;
 use crate::error::AppError;
 use crate::llm::{LlmClient, types::{LlmMessage, LlmRequest, ModelTier}};
 use crate::analysis::{
     prompts::*,
     types::*,
 };
+
+/// 流式分析推送的单个 section 事件
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SectionEvent {
+    Section { name: &'static str, data: Value },
+    Error { message: String },
+}
 
 /// 将对话消息格式化为 LLM 输入文本
 fn format_messages(messages: &[DialogMessage]) -> String {
@@ -102,16 +111,27 @@ fn fix_json_strings(s: &str) -> String {
 }
 
 fn parse_json_response<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, AppError> {
-    // 提取 JSON 块（模型有时会在前后加说明文字）
+    // 提取 JSON 块（模型有时会在前后加说明文字，或用 ```json 包裹）
     let text = text.trim();
-    let start = text.find('{').unwrap_or(0);
+    // 去掉 markdown 代码块包裹
+    let text = if let Some(inner) = text.strip_prefix("```json") {
+        inner.trim_end_matches("```").trim()
+    } else if let Some(inner) = text.strip_prefix("```") {
+        inner.trim_end_matches("```").trim()
+    } else {
+        text
+    };
+    let start = text.find('{').ok_or_else(|| {
+        tracing::error!("LLM response contains no JSON object.\nRaw response:\n{}", text);
+        AppError::LlmError("模型未返回有效 JSON，可能触发了内容过滤".to_string())
+    })?;
     let end = text.rfind('}').map(|i| i + 1).unwrap_or(text.len());
     let json_str = &text[start..end];
 
-    // 替换中文引号为转义引号（避免破坏 JSON 字符串结构）
+    // 替换中文引号为 ASCII 引号（fix_json_strings 会处理字符串内的转义）
     let json_str = json_str
-        .replace('\u{201c}', "\\\"")
-        .replace('\u{201d}', "\\\"")
+        .replace('\u{201c}', "\"")
+        .replace('\u{201d}', "\"")
         .replace('\u{2018}', "'")
         .replace('\u{2019}', "'");
 
@@ -135,29 +155,6 @@ pub struct AnalysisPipeline {
 impl AnalysisPipeline {
     pub fn new(llm: Arc<dyn LlmClient>) -> Self {
         Self { llm }
-    }
-
-    pub async fn run(&self, req: &AnalysisRequest) -> Result<AnalysisReport, AppError> {
-        let background = format_background(&req.background);
-        let dialog = format_messages(&req.messages);
-        let context = format!("{}=== 对话记录 ===\n{}", background, dialog);
-
-        // 前 4 步互相独立，并行执行；第 5 步依赖前 4 步结果，串行
-        let (emotion, patterns, risks, needs) = tokio::try_join!(
-            self.step_emotion(&context),
-            self.step_patterns(&context),
-            self.step_risks(&context),
-            self.step_needs(&context),
-        )?;
-        let suggestions = self.step_suggestions(&context, &emotion, &patterns, &risks, &needs).await?;
-
-        Ok(AnalysisReport {
-            emotion_trajectory: emotion,
-            communication_patterns: patterns,
-            risk_flags: risks,
-            core_needs: needs,
-            suggestions,
-        })
     }
 
     async fn step_emotion(&self, context: &str) -> Result<EmotionTrajectory, AppError> {
@@ -254,5 +251,49 @@ impl AnalysisPipeline {
         let v: Value = parse_json_response(&text)?;
         serde_json::from_value(v["suggestions"].clone())
             .map_err(|e| AppError::LlmError(e.to_string()))
+    }
+
+    /// 流式运行：前 4 步串行，每步完成后立即 yield section event，第 5 步最后推送
+    pub fn run_streaming(self: Arc<Self>, req: AnalysisRequest) -> impl Stream<Item = SectionEvent> {
+        async_stream::stream! {
+            let background = format_background(&req.background);
+            let dialog = format_messages(&req.messages);
+            let context = format!("{}=== 对话记录 ===\n{}", background, dialog);
+
+            // 前 4 步串行执行，避免触发代理并发限制
+            let mut emotion: Option<EmotionTrajectory> = None;
+            let mut patterns: Option<CommunicationPatterns> = None;
+            let mut risks: Option<Vec<RiskFlag>> = None;
+            let mut needs: Option<CoreNeeds> = None;
+            let mut has_error = false;
+
+            macro_rules! run_step {
+                ($field:ident, $name:expr, $fut:expr) => {
+                    let event = match $fut.await {
+                        Ok(v) => {
+                            $field = Some(v.clone());
+                            SectionEvent::Section { name: $name, data: serde_json::to_value(v).unwrap() }
+                        }
+                        Err(e) => { has_error = true; SectionEvent::Error { message: e.to_string() } }
+                    };
+                    yield event;
+                    if has_error { return; }
+                };
+            }
+
+            run_step!(emotion, "emotion_trajectory", self.step_emotion(&context));
+            run_step!(patterns, "communication_patterns", self.step_patterns(&context));
+            run_step!(risks, "risk_flags", self.step_risks(&context));
+            run_step!(needs, "core_needs", self.step_needs(&context));
+
+            // 第 5 步：suggestions 依赖前 4 步
+            if let (Some(e), Some(p), Some(r), Some(n)) = (emotion, patterns, risks, needs) {
+                let event = match self.step_suggestions(&context, &e, &p, &r, &n).await {
+                    Ok(v) => SectionEvent::Section { name: "suggestions", data: serde_json::to_value(v).unwrap() },
+                    Err(err) => SectionEvent::Error { message: err.to_string() },
+                };
+                yield event;
+            }
+        }
     }
 }

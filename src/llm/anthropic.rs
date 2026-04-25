@@ -3,8 +3,6 @@ use futures::Stream;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::pin::Pin;
-use tracing::debug;
-
 use crate::error::AppError;
 use crate::llm::{LlmClient, types::{LlmRequest, ModelTier, StreamChunk}};
 
@@ -69,7 +67,8 @@ impl AnthropicClient {
 impl LlmClient for AnthropicClient {
     async fn complete(&self, req: LlmRequest) -> Result<String, AppError> {
         let body = self.build_body(&req, false);
-        debug!("Anthropic request: model={}", self.model_name(&req.model));
+        let model = self.model_name(&req.model).to_string();
+        tracing::debug!("Anthropic complete: url={}/v1/messages model={}", self.base_url, model);
 
         let resp = self.request()
             .json(&body)
@@ -77,20 +76,43 @@ impl LlmClient for AnthropicClient {
             .await
             .map_err(|e| AppError::LlmError(e.to_string()))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        tracing::debug!("Anthropic response status: {}", status);
+
+        if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
+            tracing::error!("Anthropic HTTP error {}: {}", status, text);
             return Err(AppError::LlmError(format!("HTTP {}: {}", status, text)));
         }
 
-        let json: Value = resp.json().await
+        let raw = resp.text().await
             .map_err(|e| AppError::LlmError(e.to_string()))?;
+
+        // 安全截取用于日志（避免在 UTF-8 字符边界 panic）
+        let preview = raw.chars().take(500).collect::<String>();
+        tracing::debug!("Anthropic raw response: {}", preview);
+
+        let json: Value = serde_json::from_str(&raw)
+            .map_err(|e| {
+                tracing::error!("Anthropic response JSON parse failed: {}\nRaw: {}", e, raw);
+                AppError::LlmError(format!("响应解析失败: {}", e))
+            })?;
+
+        // 检查是否有 error 字段（部分代理会返回 200 但带 error body）
+        if let Some(err) = json.get("error") {
+            tracing::error!("Anthropic API returned error in body: {}", err);
+            return Err(AppError::LlmError(format!("API error: {}", err)));
+        }
 
         let text = json["content"][0]["text"]
             .as_str()
-            .ok_or_else(|| AppError::LlmError("响应格式异常".to_string()))?
+            .ok_or_else(|| {
+                tracing::error!("Anthropic unexpected response shape: {}", json);
+                AppError::LlmError("响应格式异常".to_string())
+            })?
             .to_string();
 
+        tracing::debug!("Anthropic LLM text (first 200 chars): {}", text.chars().take(200).collect::<String>());
         Ok(text)
     }
 
