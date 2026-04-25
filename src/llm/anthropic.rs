@@ -17,7 +17,10 @@ pub struct AnthropicClient {
 impl AnthropicClient {
     pub fn new(api_key: String, base_url: String, smart_model: String, fast_model: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
             api_key,
             base_url,
             smart_model,
@@ -82,7 +85,17 @@ impl LlmClient for AnthropicClient {
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             tracing::error!("Anthropic HTTP error {}: {}", status, text);
-            return Err(AppError::LlmError(format!("HTTP {}: {}", status, text)));
+            // 只返回简短错误信息，避免 HTML 内容破坏 SSE 格式
+            let msg = if text.contains("<!DOCTYPE") || text.contains("<html") {
+                format!("HTTP {}", status)
+            } else {
+                // 尝试提取 JSON error message
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"]["message"].as_str().map(String::from))
+                    .unwrap_or_else(|| format!("HTTP {}", status))
+            };
+            return Err(AppError::LlmError(msg));
         }
 
         let raw = resp.text().await
@@ -131,7 +144,16 @@ impl LlmClient for AnthropicClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(AppError::LlmError(format!("HTTP {}: {}", status, text)));
+            tracing::error!("Anthropic stream HTTP error {}: {}", status, text);
+            let msg = if text.contains("<!DOCTYPE") || text.contains("<html") {
+                format!("HTTP {}", status)
+            } else {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"]["message"].as_str().map(String::from))
+                    .unwrap_or_else(|| format!("HTTP {}", status))
+            };
+            return Err(AppError::LlmError(msg));
         }
 
         let stream = async_stream::stream! {

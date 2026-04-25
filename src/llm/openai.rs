@@ -59,7 +59,15 @@ impl LlmClient for OpenAiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(AppError::LlmError(format!("HTTP {}: {}", status, text)));
+            let msg = if text.contains("<!DOCTYPE") || text.contains("<html") {
+                format!("HTTP {}", status)
+            } else {
+                serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"]["message"].as_str().map(String::from))
+                    .unwrap_or_else(|| format!("HTTP {}", status))
+            };
+            return Err(AppError::LlmError(msg));
         }
 
         let json: Value = resp.json().await
@@ -95,7 +103,15 @@ impl LlmClient for OpenAiClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(AppError::LlmError(format!("HTTP {}: {}", status, text)));
+            let msg = if text.contains("<!DOCTYPE") || text.contains("<html") {
+                format!("HTTP {}", status)
+            } else {
+                serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| v["error"]["message"].as_str().map(String::from))
+                    .unwrap_or_else(|| format!("HTTP {}", status))
+            };
+            return Err(AppError::LlmError(msg));
         }
 
         let stream = async_stream::stream! {
